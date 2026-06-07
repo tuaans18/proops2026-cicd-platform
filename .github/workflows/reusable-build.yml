@@ -1,0 +1,96 @@
+name: Reusable Build
+
+# CHỈ có thể được gọi bởi workflow khác (không trigger tự động)
+on:
+  workflow_call:
+    inputs:
+      stack:
+        description: "dotnet | kotlin"
+        type: string
+        required: true
+      service-name:
+        description: "e.g. api-gateway, inventory-service"
+        type: string
+        required: true
+      push-image:
+        description: "true khi merge vào main, false khi chỉ PR"
+        type: boolean
+        default: false
+
+    # ══════════════════════════════════════════════════
+    # LEVEL 3 (cao nhất): Workflow-level outputs
+    # Đây là "cửa thoát" để caller đọc được giá trị từ bên trong
+    # Nếu thiếu block này → caller gọi needs.build.outputs.image-tag sẽ nhận được chuỗi rỗng
+    # ══════════════════════════════════════════════════
+    outputs:
+      image-tag:
+        description: "Commit SHA dùng làm image tag — caller dùng needs.<job>.outputs.image-tag"
+        value: ${{ jobs.build.outputs.image-tag }}  # Tham chiếu đến LEVEL 2 bên dưới
+
+    secrets:
+      REGISTRY_TOKEN:
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # ══════════════════════════════════════════════════
+    # LEVEL 2: Job-level outputs
+    # Cầu nối giữa step outputs (level 1) và workflow outputs (level 3)
+    # Cú pháp: <tên-output>: ${{ steps.<step-id>.outputs.<tên> }}
+    # ══════════════════════════════════════════════════
+    outputs:
+      image-tag: ${{ steps.set-tag.outputs.tag }}  # Tham chiếu đến LEVEL 1 bên dưới
+
+    permissions:
+      contents: read
+      packages: write  # Cần để push image lên GHCR
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.repository.full_name }}
+          ref: ${{ github.sha }}
+
+      # ══════════════════════════════════════════════════
+      # LEVEL 1: Step-level output — đây là nơi SHA được "export"
+      # $GITHUB_OUTPUT là file đặc biệt của GitHub Actions runner
+      # Cú pháp: echo "key=value" >> $GITHUB_OUTPUT
+      # github.sha = full 40-char commit SHA của commit đang chạy
+      # ══════════════════════════════════════════════════
+      - name: Export image tag
+        id: set-tag  # id này được dùng ở LEVEL 2: steps.set-tag.outputs.tag
+        run: echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Build .NET service
+        if: inputs.stack == 'dotnet'
+        uses: tuaans18/proops2026-cicd-platform/.github/actions/build-dotnet@v1
+        with:
+          working-directory: ${{ inputs.service-name }}
+
+      - name: Build Kotlin service
+        if: inputs.stack == 'kotlin'
+        uses: tuaans18/proops2026-cicd-platform/.github/actions/build-kotlin@v1
+        with:
+          working-directory: ${{ inputs.service-name }}
+
+      - name: Docker build and push
+        uses: tuaans18/proops2026-cicd-platform/.github/actions/docker-build-push@v1
+        with:
+          image-name: ${{ github.repository_owner }}/proops2026-eshop/${{ inputs.service-name }}
+          image-tag: ${{ steps.set-tag.outputs.tag }}  # Dùng output từ step trên
+          push: ${{ inputs.push-image }}
+          context: ${{ inputs.service-name }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # Hiển thị SHA trong run summary để trainee copy cho workflow_dispatch
+      - name: Summary
+        run: |
+          echo "## Build Result" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | ${{ inputs.service-name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Tag (SHA) | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`ghcr.io/${{ github.repository_owner }}/proops2026-eshop/${{ inputs.service-name }}:${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY

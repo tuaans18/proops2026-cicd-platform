@@ -1,0 +1,132 @@
+name: Reusable Deploy
+
+on:
+  workflow_call:
+    inputs:
+      image-tag:
+        description: "Commit SHA của image cần deploy — PHẢI là SHA đã được build và push"
+        type: string
+        required: true
+      environment:
+        description: "dev | staging | prod"
+        type: string
+        required: true
+      service-name:
+        description: "e.g. api-gateway"
+        type: string
+        required: true
+      project-owner:
+        description: "GitHub username, dùng để tạo GHCR image URL"
+        type: string
+        required: false
+        default: "tuaans18"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # ══════════════════════════════════════════════════
+    # KEY LINE: environment: tại job level
+    #
+    # Điều này làm 2 việc đồng thời:
+    # (1) SECRET ROUTING: GitHub tìm secret KUBE_CONFIG_DATA trong environment "dev"
+    #     (hoặc "staging" hoặc "prod") thay vì repo-level secret
+    #     → Cùng tên KUBE_CONFIG_DATA, khác giá trị per environment
+    # (2) ENVIRONMENT TRACKING: Deploy này được ghi vào tab Deployments của repo
+    #     → Có thể xem lịch sử "ai deploy gì lên env nào lúc mấy giờ"
+    #
+    # QUAN TRỌNG: Nếu đặt environment: tại workflow level (không phải job level)
+    # thì secret resolution KHÔNG hoạt động — phải ở job level
+    # ══════════════════════════════════════════════════
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ══════════════════════════════════════════════════
+      # KIND-IN-CI: Tạo K8s cluster tạm thời bên trong GitHub Actions runner
+      #
+      # Tại sao dùng kind thay vì cluster thật?
+      # Training context: không cần persistent cluster tốn tiền
+      # Production context: dùng kubeconfig của cluster thật (EKS/GKE/AKS)
+      # trong secret KUBE_CONFIG_DATA
+      #
+      # helm/kind-action@v1 = composite action từ team Helm
+      # cluster_name = tên cluster bên trong runner, không ảnh hưởng gì ra ngoài
+      # ══════════════════════════════════════════════════
+      - name: Create kind cluster (${{ inputs.environment }})
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ${{ inputs.environment }}-cluster
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      # Tạo namespace nếu chưa có
+      # --dry-run=client -o yaml | kubectl apply -f - = idempotent:
+      # chạy lần 1 → tạo namespace
+      # chạy lần 2 → "unchanged", không lỗi
+      - name: Create namespace
+        run: |
+          kubectl create namespace ${{ inputs.environment }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # Apply K8s manifest từ service repo
+      # Manifest này phải đã checkout ở bước actions/checkout@v4
+      # -n flag: chỉ định namespace, tránh deploy nhầm env
+      - name: Apply K8s manifest
+        run: |
+          kubectl apply -f k8s/${{ inputs.service-name }}/deployment.yaml \
+            -n ${{ inputs.environment }}
+
+      # ══════════════════════════════════════════════════
+      # KEY STEP: kubectl set image — đây là "promotion" thực sự
+      #
+      # Cú pháp: kubectl set image deployment/<name> <container>=<image>:<tag>
+      # Điều này UPDATE deployment spec với image mới
+      # Kubernetes sau đó tự rolling update pods
+      #
+      # Lưu ý: ghcr.io/tuaans18/proops2026-eshop/api-gateway:<sha>
+      # Đây là CÙNG image tag đã build trong reusable-build.yml
+      # Không rebuild — chỉ reference lại tag đã tồn tại trong registry
+      # ══════════════════════════════════════════════════
+      - name: Deploy ${{ inputs.service-name }} @ SHA ${{ inputs.image-tag }}
+        run: |
+          kubectl -n ${{ inputs.environment }} set image \
+            deployment/${{ inputs.service-name }} \
+            ${{ inputs.service-name }}=ghcr.io/${{ inputs.project-owner }}/proops2026-eshop/${{ inputs.service-name }}:${{ inputs.image-tag }}
+          echo "Deployment updated. Waiting for rollout..."
+          kubectl -n ${{ inputs.environment }} rollout status \
+            deployment/${{ inputs.service-name }} --timeout=120s || true
+
+      # ══════════════════════════════════════════════════
+      # VERIFICATION STEP — đây là "proof" của promotion model
+      #
+      # kubectl get deployment -o jsonpath: đọc trực tiếp deployment spec
+      # (không cần pod phải running — spec đã ghi SHA rồi)
+      #
+      # kubectl describe pod | grep Image: đọc từ pod đang chạy
+      # (dùng khi muốn verify runtime, có thể thấy "ImagePullBackOff" nếu private)
+      # ══════════════════════════════════════════════════
+      - name: Verify SHA in ${{ inputs.environment }}
+        run: |
+          echo "=== SHA Verification: ${{ inputs.environment }} ==="
+          echo ""
+          echo "Deployment spec (source of truth):"
+          kubectl -n ${{ inputs.environment }} get deployment ${{ inputs.service-name }} \
+            -o jsonpath='{.spec.template.spec.containers[0].image}' && echo ""
+          echo ""
+          echo "Pod status:"
+          kubectl -n ${{ inputs.environment }} get pods \
+            -l app=${{ inputs.service-name }} -o wide || true
+
+      - name: Summary
+        run: |
+          IMAGE="ghcr.io/${{ inputs.project-owner }}/proops2026-eshop/${{ inputs.service-name }}:${{ inputs.image-tag }}"
+          echo "## Deploy Result: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | ${{ inputs.service-name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image SHA | \`${{ inputs.image-tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Full Image | \`$IMAGE\` |" >> $GITHUB_STEP_SUMMARY
