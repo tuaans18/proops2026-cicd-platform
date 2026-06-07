@@ -39,19 +39,18 @@ jobs:
       # Bước build — chọn composite action tùy stack
       - name: Build .NET service
         if: inputs.stack == 'dotnet'
-        uses: ./.github/actions/build-dotnet    # relative path — cùng repo
+        uses: tuaans18/proops2026-cicd-platform/.github/actions/build-dotnet@v1
         with:
           working-directory: ${{ inputs.service-name }}
 
       - name: Build Kotlin service
         if: inputs.stack == 'kotlin'
-        uses: ./.github/actions/build-kotlin    # relative path — cùng repo
+        uses: tuaans18/proops2026-cicd-platform/.github/actions/build-kotlin@v1
         with:
           working-directory: ${{ inputs.service-name }}
 
-      # Bước build + push image — dùng composite action thứ 3
       - name: Docker build and push
-        uses: ./.github/actions/docker-build-push
+        uses: tuaans18/proops2026-cicd-platform/.github/actions/docker-build-push@v1
         with:
           image-name: ${{ github.repository_owner }}/proops2026-eshop/${{ inputs.service-name }}
           image-tag: ${{ inputs.image-tag }}
