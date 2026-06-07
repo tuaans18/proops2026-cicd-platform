@@ -55,5 +55,6 @@ jobs:
           image-name: ${{ github.repository_owner }}/proops2026-eshop/${{ inputs.service-name }}
           image-tag: ${{ inputs.image-tag }}
           push: ${{ inputs.push-image }}
+          context: ${{ inputs.service-name }}   # api-gateway/ inventory-service/ etc.
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_TOKEN }}
