@@ -1,0 +1,60 @@
+name: Reusable App CI
+
+on:
+  workflow_call:                    # "cổng" để service repo gọi vào
+    inputs:
+      stack:
+        description: "dotnet | kotlin"
+        type: string
+        required: true
+      service-name:
+        description: "e.g. api-gateway, inventory-service"
+        type: string
+        required: true
+      image-tag:
+        description: "Commit SHA"
+        type: string
+        required: true
+      push-image:
+        description: "true khi merge vào main, false khi chỉ open PR"
+        type: boolean
+        default: false
+    secrets:
+      REGISTRY_TOKEN:
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write             # cần để push lên GHCR
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.repository.full_name }}
+          ref: ${{ github.sha }}
+
+      # Bước build — chọn composite action tùy stack
+      - name: Build .NET service
+        if: inputs.stack == 'dotnet'
+        uses: ./.github/actions/build-dotnet    # relative path — cùng repo
+        with:
+          working-directory: ${{ inputs.service-name }}
+
+      - name: Build Kotlin service
+        if: inputs.stack == 'kotlin'
+        uses: ./.github/actions/build-kotlin    # relative path — cùng repo
+        with:
+          working-directory: ${{ inputs.service-name }}
+
+      # Bước build + push image — dùng composite action thứ 3
+      - name: Docker build and push
+        uses: ./.github/actions/docker-build-push
+        with:
+          image-name: ${{ github.repository_owner }}/proops2026-eshop/${{ inputs.service-name }}
+          image-tag: ${{ inputs.image-tag }}
+          push: ${{ inputs.push-image }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.REGISTRY_TOKEN || secrets.GITHUB_TOKEN }}

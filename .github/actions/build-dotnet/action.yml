@@ -1,0 +1,33 @@
+name: "Build .NET App"
+description: "Restore, build, and test a .NET 8 service"
+
+inputs:
+  working-directory:
+    description: "Service folder to build (e.g. api-gateway)"
+    required: true
+  dotnet-version:
+    description: ".NET SDK version"
+    required: false
+    default: "8.0.x"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
+    - name: Restore
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: dotnet restore
+
+    - name: Build
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: dotnet build --no-restore -warnaserror
+
+    - name: Test
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: dotnet test --no-restore
