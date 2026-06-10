@@ -1,0 +1,99 @@
+name: Reusable Deploy — EKS
+
+on:
+  workflow_call:
+    inputs:
+      image-tag:
+        description: "Commit SHA của image cần deploy"
+        type: string
+        required: true
+      environment:
+        description: "dev | staging | prod"
+        type: string
+        required: true
+      service-name:
+        description: "e.g. api-gateway"
+        type: string
+        required: true
+      cluster-name:
+        description: "EKS cluster name — lấy từ terraform output eks_cluster_name"
+        type: string
+        required: true
+      aws-region:
+        type: string
+        default: "ap-northeast-1"
+      project-owner:
+        type: string
+        default: "tuaans18"
+    secrets:
+      AWS_DEPLOY_ROLE_ARN:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC token request
+      contents: read
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Bước 1: Lấy AWS credentials qua OIDC (không cần static key) ──
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      # ── Bước 2: Ghi kubeconfig để kubectl/helm biết connect EKS nào ──
+      # aws eks update-kubeconfig = fetch cluster endpoint + CA cert + token
+      # ghi vào ~/.kube/config → kubectl tự dùng
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ inputs.cluster-name }} \
+            --region ${{ inputs.aws-region }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Create namespace
+        run: |
+          kubectl create namespace ${{ inputs.environment }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply K8s manifest
+        run: |
+          kubectl apply -f k8s/${{ inputs.service-name }}/deployment.yaml \
+            -n ${{ inputs.environment }}
+
+      - name: Deploy ${{ inputs.service-name }} @ SHA ${{ inputs.image-tag }}
+        run: |
+          kubectl -n ${{ inputs.environment }} set image \
+            deployment/${{ inputs.service-name }} \
+            ${{ inputs.service-name }}=ghcr.io/${{ inputs.project-owner }}/proops2026-eshop/${{ inputs.service-name }}:${{ inputs.image-tag }}
+          echo "Waiting for rollout..."
+          kubectl -n ${{ inputs.environment }} rollout status \
+            deployment/${{ inputs.service-name }} --timeout=180s
+
+      - name: Verify SHA in ${{ inputs.environment }}
+        run: |
+          echo "=== SHA Verification: ${{ inputs.environment }} ==="
+          kubectl -n ${{ inputs.environment }} get deployment ${{ inputs.service-name }} \
+            -o jsonpath='{.spec.template.spec.containers[0].image}' && echo ""
+          kubectl -n ${{ inputs.environment }} get pods \
+            -l app=${{ inputs.service-name }} -o wide || true
+
+      - name: Summary
+        run: |
+          IMAGE="ghcr.io/${{ inputs.project-owner }}/proops2026-eshop/${{ inputs.service-name }}:${{ inputs.image-tag }}"
+          echo "## Deploy Result: ${{ inputs.environment }} (EKS)" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cluster | ${{ inputs.cluster-name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | ${{ inputs.service-name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image SHA | \`${{ inputs.image-tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Full Image | \`$IMAGE\` |" >> $GITHUB_STEP_SUMMARY
